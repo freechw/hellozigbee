@@ -27,6 +27,18 @@ extern "C"
     #include "OnOff.h"
 }
 
+#include "Queue.h"
+#include "Timer.h"
+#include "DeferredExecutor.h"
+#include "BlinkTask.h"
+#include "ButtonsTask.h"
+#include "AppQueue.h"
+#include "ConnectionState.h"
+#include "DumpFunctions.h"
+
+DeferredExecutor deferredExecutor;
+PersistedValue<JoinStateEnum, PDM_ID_NODE_STATE> connectionState;
+
 // Hidden funcctions (exported from the library, but not mentioned in header files)
 extern "C"
 {
@@ -36,126 +48,25 @@ extern "C"
 }
 
 
-#define BOARD_LED_BIT               (17)
-#define BOARD_LED_PIN               (1UL << BOARD_LED_BIT)
-
-#define BOARD_BTN_BIT               (1)
-#define BOARD_BTN_PIN               (1UL << BOARD_BTN_BIT)
-
 #define PDM_ID_BLINK_MODE   	    0x2
 
 tsZLO_OnOffLightDevice sSwitch;
 
 
 ZTIMER_tsTimer timers[3 + BDB_ZTIMER_STORAGE];
-uint8 blinkTimerHandle;
-uint8 buttonScanTimerHandle;
-uint8 runLaterTimerHandle;
-
-typedef enum
-{
-	BUTTON_SHORT_PRESS,
-	BUTTON_LONG_PRESS
-} ButtonPressType;
-
-ButtonPressType buttonQueue[3];
-tszQueue buttonQueueHandle;
 
 
-#define RUN_LATER_QUEUE_SIZE 20
-typedef void (*runLaterCallback)(uint8);
-uint32 runLaterDelayQueue[RUN_LATER_QUEUE_SIZE];
-uint8 runLaterParamsQueue[RUN_LATER_QUEUE_SIZE];
-runLaterCallback runLaterCallbackQueue[RUN_LATER_QUEUE_SIZE];
 
-PRIVATE tszQueue runLaterDelayQueueHandle;
-PRIVATE tszQueue runLaterCallbacksQueueHandle;
-PRIVATE tszQueue runLaterParamsQueueHandle;
-
-
-void runLater(uint32 delay, runLaterCallback cb, uint8 param)
-{
-    ZQ_bQueueSend(&runLaterDelayQueueHandle, (uint8*)&delay);
-    ZQ_bQueueSend(&runLaterCallbacksQueueHandle, (uint8*)&cb);
-    ZQ_bQueueSend(&runLaterParamsQueueHandle, (uint8*)&param);
-}
-
-PUBLIC void runLaterFunc(void *pvParam)
-{
-    DBG_vPrintf(TRUE, "runLaterFunc()\n");
-
-    runLaterCallback cb;
-    ZQ_bQueueReceive(&runLaterCallbacksQueueHandle, (uint8*)&cb);
-    uint8 param;
-    ZQ_bQueueReceive(&runLaterParamsQueueHandle, (uint8*)&param);
-    (*cb)(param);
-}
-
-
-#define BDB_QUEUE_SIZE              3
-#define MLME_QUEUE_SIZE             10
-#define MCPS_QUEUE_SIZE             24
-#define TIMER_QUEUE_SIZE            8
-#define MCPS_DCFM_QUEUE_SIZE        5
 
 extern PUBLIC tszQueue zps_msgMlmeDcfmInd;
 extern PUBLIC tszQueue zps_msgMcpsDcfmInd;
 extern PUBLIC tszQueue zps_TimeEvents;
 extern PUBLIC tszQueue zps_msgMcpsDcfm;
 
-PRIVATE MAC_tsMlmeVsDcfmInd asMacMlmeVsDcfmInd[MLME_QUEUE_SIZE];
-PRIVATE MAC_tsMcpsVsDcfmInd asMacMcpsDcfmInd[MCPS_QUEUE_SIZE];
-PRIVATE MAC_tsMcpsVsCfmData asMacMcpsDcfm[MCPS_DCFM_QUEUE_SIZE];
-PRIVATE zps_tsTimeEvent asTimeEvent[TIMER_QUEUE_SIZE];
-PRIVATE BDB_tsZpsAfEvent asBdbEvent[BDB_QUEUE_SIZE];
-
-PRIVATE tszQueue APP_msgBdbEvents;
-
-
-
-PUBLIC void blinkFunc(void *pvParam)
-{
-    uint32 currentState = u32AHI_DioReadInput();
-    vAHI_DioSetOutput(currentState^BOARD_LED_PIN, currentState&BOARD_LED_PIN);
-    ZTIMER_eStart(blinkTimerHandle, sSwitch.sOnOffServerCluster.bOnOff ? ZTIMER_TIME_MSEC(200) : ZTIMER_TIME_MSEC(1000));
-}
-
-
-PUBLIC void buttonScanFunc(void *pvParam)
-{
-    static int duration = 0;
-
-    uint32 input = u32AHI_DioReadInput();
-    bool btnState = (input & BOARD_BTN_PIN) == 0;
-
-    if(btnState)
-    {
-        duration++;
-        DBG_vPrintf(TRUE, "Button still pressed for %d ticks\n", duration);
-    }
-    else
-    {
-        // detect long press
-        if(duration > 200)
-        {
-            DBG_vPrintf(TRUE, "Button released. Long press detected\n");
-            ButtonPressType value = BUTTON_LONG_PRESS;
-            ZQ_bQueueSend(&buttonQueueHandle, (uint8*)&value);
-        }
-
-        // detect short press
-        else if(duration > 5)
-        {
-            DBG_vPrintf(TRUE, "Button released. Short press detected\n");
-            ButtonPressType value = BUTTON_SHORT_PRESS;
-            ZQ_bQueueSend(&buttonQueueHandle, &value);
-        }
-
-        duration = 0;
-    }
-
-    ZTIMER_eStart(buttonScanTimerHandle, ZTIMER_TIME_MSEC(10));
-}
+QueueExt<MAC_tsMlmeVsDcfmInd, 10, &zps_msgMlmeDcfmInd> msgMlmeDcfmIndQueue;
+QueueExt<MAC_tsMcpsVsDcfmInd, 24, &zps_msgMcpsDcfmInd> msgMcpsDcfmIndQueue;
+QueueExt<MAC_tsMcpsVsCfmData, 5, &zps_msgMcpsDcfm> msgMcpsDcfmQueue;
+QueueExt<zps_tsTimeEvent, 8, &zps_TimeEvents> timeEventQueue;
 
 extern "C" PUBLIC void vISR_SystemController(void)
 {
@@ -163,8 +74,6 @@ extern "C" PUBLIC void vISR_SystemController(void)
 
 PRIVATE void APP_ZCL_cbGeneralCallback(tsZCL_CallBackEvent *psEvent)
 {
-    DBG_vPrintf(TRUE, "ZCL General Callback: Processing event %d\n", psEvent->eEventType);
-
     switch (psEvent->eEventType)
     {
 
@@ -205,28 +114,6 @@ PRIVATE void APP_ZCL_cbGeneralCallback(tsZCL_CallBackEvent *psEvent)
     }
 }
 
-PRIVATE void vDumpZclReadRequest(tsZCL_CallBackEvent *psEvent)
-{
-    // Read command header
-    tsZCL_HeaderParams headerParams;
-    uint16 inputOffset = u16ZCL_ReadCommandHeader(psEvent->pZPSevent->uEvent.sApsDataIndEvent.hAPduInst,
-                                              &headerParams);
-
-    // read input attribute Id
-    uint16 attributeId;
-    inputOffset += u16ZCL_APduInstanceReadNBO(psEvent->pZPSevent->uEvent.sApsDataIndEvent.hAPduInst,
-                                              inputOffset,
-                                              E_ZCL_ATTRIBUTE_ID,
-                                              &attributeId);
-
-
-    DBG_vPrintf(TRUE, "ZCL Read Attribute: EP=%d Cluster=%04x Command=%02x Attr=%04x\n",
-                psEvent->u8EndPoint,
-                psEvent->pZPSevent->uEvent.sApsDataIndEvent.u16ClusterId,
-                headerParams.u8CommandIdentifier,
-                attributeId);
-}
-
 PRIVATE void vHandleCustomClusterMessage(tsZCL_CallBackEvent *psEvent)
 {
     uint16 u16ClusterId = psEvent->uMessage.sClusterCustomMessage.u16ClusterId;
@@ -245,6 +132,62 @@ PRIVATE void vHandleClusterUpdateMessage(tsZCL_CallBackEvent *psEvent)
     DBG_vPrintf(TRUE, "ZCL Endpoint Callback: Cluster update message EP=%d ClusterID=%04x Cmd=%02x\n", psEvent->u8EndPoint, u16ClusterId, u8CommandId);
 }
 
+PRIVATE void vJoinNetwork()
+{
+    DBG_vPrintf(TRUE, "== Joining the network\n");
+    connectionState = JOINING;
+
+    // Clear ZigBee stack internals
+    ZPS_eAplAibSetApsUseExtendedPanId (0);
+    ZPS_vDefaultStack();
+    ZPS_vSetKeys();
+    ZPS_vSaveAllZpsRecords();
+
+    // Connect to a network
+    BDB_eNsStartNwkSteering();
+}
+
+PRIVATE void vHandleNetworkJoinAndRejoin()
+{
+    DBG_vPrintf(TRUE, "== Device now is on the network\n");
+    connectionState = JOINED;
+    ZPS_vSaveAllZpsRecords();
+}
+
+PRIVATE void vHandleLeaveNetwork()
+{
+    DBG_vPrintf(TRUE, "== The device has left the network\n");
+
+    connectionState = NOT_JOINED;
+
+    // Clear ZigBee stack internals
+    ZPS_eAplAibSetApsUseExtendedPanId (0);
+    ZPS_vDefaultStack();
+    ZPS_vSetKeys();
+    ZPS_vSaveAllZpsRecords();
+}
+
+PRIVATE void vHandleRejoinFailure()
+{
+    DBG_vPrintf(TRUE, "== Failed to (re)join the network\n");
+
+    vHandleLeaveNetwork();
+}
+
+
+PRIVATE void vLeaveNetwork()
+{
+    DBG_vPrintf(TRUE, "== Leaving the network\n");
+    sBDB.sAttrib.bbdbNodeIsOnANetwork = FALSE;
+    connectionState = NOT_JOINED;
+
+    if (ZPS_E_SUCCESS !=  ZPS_eAplZdoLeaveNetwork(0, FALSE, FALSE))
+    {
+        // Leave failed, probably lost parent, so just reset everything
+        DBG_vPrintf(TRUE, "== Failed to properly leave the network. Force leaving the network\n");
+        vHandleLeaveNetwork();
+     }
+}
 
 PRIVATE void APP_ZCL_cbEndpointCallback(tsZCL_CallBackEvent *psEvent)
 {
@@ -295,7 +238,6 @@ void vfExtendedStatusCallBack (ZPS_teExtendedStatus eExtendedStatus)
     DBG_vPrintf(TRUE,"ERROR: Extended status %x\n", eExtendedStatus);
 }
 
-#if 0
 PRIVATE void vGetCoordinatorEndpoints(uint8)
 {
     PDUM_thAPduInstance hAPduInst = PDUM_hAPduAllocateAPduInstance(apduZDP);
@@ -318,7 +260,6 @@ PRIVATE void vGetCoordinatorEndpoints(uint8)
 
     DBG_vPrintf(TRUE, "Sent Active endpoints request to coordinator %d\n", status);
 }
-#endif
 
 PRIVATE void vSendSimpleDescriptorReq(uint8 ep)
 {
@@ -344,135 +285,6 @@ PRIVATE void vSendSimpleDescriptorReq(uint8 ep)
     DBG_vPrintf(TRUE, "Sent Simple Descriptor request to coordinator for EP %d (status %d)\n", ep, status);
 }
 
-PRIVATE void vHandleDiscoveryComplete(ZPS_tsAfNwkDiscoveryEvent * pEvent)
-{
-    // Check if there is a suitable network to join
-    if(pEvent->u8SelectedNetwork == 0xff)
-    {
-        DBG_vPrintf(TRUE, "Network Discovery Complete: No good network to join\n");
-        return;
-    }
-
-    // Join the network
-    ZPS_tsNwkNetworkDescr * pNetwork = pEvent->psNwkDescriptors + pEvent->u8SelectedNetwork;
-    DBG_vPrintf(TRUE, "Network Discovery Complete: Joining network %016llx\n", pNetwork->u64ExtPanId);
-    ZPS_teStatus status = ZPS_eAplZdoJoinNetwork(pNetwork);
-    DBG_vPrintf(TRUE, "Network Discovery Complete: ZPS_eAplZdoJoinNetwork() status %d\n", status);
-}
-
-PRIVATE void vDumpDiscoveryCompleteEvent(ZPS_tsAfNwkDiscoveryEvent * pEvent)
-{
-    DBG_vPrintf(TRUE, "Network Discovery Complete: status %02x\n", pEvent->eStatus);
-    DBG_vPrintf(TRUE, "    Network count: %d\n", pEvent->u8NetworkCount);
-    DBG_vPrintf(TRUE, "    Selected network: %d\n", pEvent->u8SelectedNetwork);
-    DBG_vPrintf(TRUE, "    Unscanned channels: %4x\n", pEvent->u32UnscannedChannels);
-
-    for(uint8 i = 0; i < pEvent->u8NetworkCount; i++)
-    {
-        DBG_vPrintf(TRUE, "    Network %d\n", i);
-
-        ZPS_tsNwkNetworkDescr * pNetwork = pEvent->psNwkDescriptors + i;
-
-        DBG_vPrintf(TRUE, "        Extended PAN ID : %016llx\n", pNetwork->u64ExtPanId);
-        DBG_vPrintf(TRUE, "        Logical channel : %d\n", pNetwork->u8LogicalChan);
-        DBG_vPrintf(TRUE, "        Stack Profile: %d\n", pNetwork->u8StackProfile);
-        DBG_vPrintf(TRUE, "        ZigBee version: %d\n", pNetwork->u8ZigBeeVersion);
-        DBG_vPrintf(TRUE, "        Permit Joining: %d\n", pNetwork->u8PermitJoining);
-        DBG_vPrintf(TRUE, "        Router capacity: %d\n", pNetwork->u8RouterCapacity);
-        DBG_vPrintf(TRUE, "        End device capacity: %d\n", pNetwork->u8EndDeviceCapacity);
-    }
-}
-
-
-PRIVATE void vDumpDataIndicationEvent(ZPS_tsAfDataIndEvent * pEvent)
-{
-    DBG_vPrintf(TRUE, "ZPS_EVENT_APS_DATA_INDICATION: SrcEP=%d DstEP=%d SrcAddr=%04x Cluster=%04x Status=%d\n",
-            pEvent->u8SrcEndpoint,
-            pEvent->u8DstEndpoint,
-            pEvent->uSrcAddress.u16Addr,
-            pEvent->u16ClusterId,
-            pEvent->eStatus);
-}
-
-
-PRIVATE void vDumpDataConfirmEvent(ZPS_tsAfDataConfEvent * pEvent)
-{
-    DBG_vPrintf(TRUE, "ZPS_EVENT_APS_DATA_CONFIRM: SrcEP=%d DstEP=%d DstAddr=%04x Status=%d\n",
-            pEvent->u8SrcEndpoint,
-            pEvent->u8DstEndpoint,
-            pEvent->uDstAddr.u16Addr,
-            pEvent->u8Status);
-}
-
-PRIVATE void vDumpDataAckEvent(ZPS_tsAfDataAckEvent * pEvent)
-{
-    DBG_vPrintf(TRUE, "ZPS_EVENT_APS_DATA_ACK: SrcEP=%d DrcEP=%d DstAddr=%04x Profile=%04x Cluster=%04x\n",
-                pEvent->u8SrcEndpoint,
-                pEvent->u8DstEndpoint,
-                pEvent->u16DstAddr,
-                pEvent->u16ProfileId,
-                pEvent->u16ClusterId);
-}
-
-PRIVATE void vDumpJoinedAsRouterEvent(ZPS_tsAfNwkJoinedEvent * pEvent)
-{
-    DBG_vPrintf(TRUE, "ZPS_EVENT_NWK_JOINED_AS_ROUTER: Addr=%04x, rejoin=%d, secured rejoin=%d\n",
-                pEvent->u16Addr,
-                pEvent->bRejoin,
-                pEvent->bSecuredRejoin);
-}
-
-PRIVATE void vDumpNwkStatusIndicationEvent(ZPS_tsAfNwkStatusIndEvent * pEvent)
-{
-    DBG_vPrintf(TRUE, "ZPS_EVENT_NWK_STATUS_INDICATION: Addr:%04x Status:%02x\n",
-        pEvent->u16NwkAddr,
-        pEvent->u8Status);
-}
-
-PRIVATE void vDumpNwkFailedToJoinEvent(ZPS_tsAfNwkJoinFailedEvent * pEvent)
-{
-    DBG_vPrintf(TRUE, "ZPS_EVENT_NWK_FAILED_TO_JOIN: Status: %02x Rejoin:%02x\n",
-        pEvent->u8Status,
-        pEvent->bRejoin);
-}
-
-PRIVATE void vDumpAfEvent(ZPS_tsAfEvent* psStackEvent)
-{
-    switch(psStackEvent->eType)
-    {
-        case ZPS_EVENT_APS_DATA_INDICATION:
-            vDumpDataIndicationEvent(&psStackEvent->uEvent.sApsDataIndEvent);
-            break;
-
-        case ZPS_EVENT_APS_DATA_CONFIRM:
-            vDumpDataConfirmEvent(&psStackEvent->uEvent.sApsDataConfirmEvent);
-            break;
-
-        case ZPS_EVENT_APS_DATA_ACK:
-            vDumpDataAckEvent(&psStackEvent->uEvent.sApsDataAckEvent);
-            break;
-
-        case ZPS_EVENT_NWK_JOINED_AS_ROUTER:
-            vDumpJoinedAsRouterEvent(&psStackEvent->uEvent.sNwkJoinedEvent);
-            break;
-
-        case ZPS_EVENT_NWK_STATUS_INDICATION:
-            vDumpNwkStatusIndicationEvent(&psStackEvent->uEvent.sNwkStatusIndicationEvent);
-            break;
-
-        case ZPS_EVENT_NWK_FAILED_TO_JOIN:
-            vDumpNwkFailedToJoinEvent(&psStackEvent->uEvent.sNwkJoinFailedEvent);
-            break;
-
-        case ZPS_EVENT_NWK_DISCOVERY_COMPLETE:
-            vDumpDiscoveryCompleteEvent(&psStackEvent->uEvent.sNwkDiscoveryEvent);
-            break;
-
-        default:
-            DBG_vPrintf(TRUE, "Unknown Zigbee stack event: event type %d\n", psStackEvent->eType);
-            break;
-    }
-}
 
 PRIVATE void vHandleZdoDataIndication(ZPS_tsAfEvent * pEvent)
 {
@@ -489,23 +301,57 @@ PRIVATE void vHandleZdoDataIndication(ZPS_tsAfEvent * pEvent)
                 uint8 ep = zdpEvent.uLists.au8Data[i];
                 DBG_vPrintf(TRUE, "Scheduling simple descriptor request for EP %d\n", ep);
 
-                runLater(1000, vSendSimpleDescriptorReq, ep);
+                deferredExecutor.runLater(1000, vSendSimpleDescriptorReq, ep);
             }
         }
     }
 }
 
+PRIVATE void vHandleZdoBindEvent(ZPS_tsAfZdoBindEvent * pEvent)
+{
+    ZPS_teStatus status = ZPS_eAplZdoBind(GENERAL_CLUSTER_ID_ONOFF,
+                                          pEvent->u8SrcEp,
+                                          0x2C9C,
+                                          pEvent->uDstAddr.u64Addr,
+                                          pEvent->u8DstEp);
+    DBG_vPrintf(TRUE, "Binding SrcEP=%d to DstEP=%d Status=%d\n", pEvent->u8SrcEp, pEvent->u8DstEp, status);
+}
+
+PRIVATE void vHandleZdoUnbindEvent(ZPS_tsAfZdoUnbindEvent * pEvent)
+{
+
+}
+
 
 PRIVATE void vAppHandleZdoEvents(ZPS_tsAfEvent* psStackEvent)
 {
+    if(connectionState != JOINED)
+    {
+        DBG_vPrintf(TRUE, "Handle ZDO event: Not joined yet. Discarding event %d\n", psStackEvent->eType);
+        return;
+    }
+
     switch(psStackEvent->eType)
     {
-        case ZPS_EVENT_NWK_DISCOVERY_COMPLETE:
-            vHandleDiscoveryComplete(&psStackEvent->uEvent.sNwkDiscoveryEvent);
-            break;
-
         case ZPS_EVENT_APS_DATA_INDICATION:
             vHandleZdoDataIndication(psStackEvent);
+            break;
+
+        case ZPS_EVENT_NWK_LEAVE_INDICATION:
+            if(psStackEvent->uEvent.sNwkLeaveIndicationEvent.u64ExtAddr == 0)
+                vHandleLeaveNetwork();
+            break;
+
+        case ZPS_EVENT_NWK_LEAVE_CONFIRM:
+            vHandleLeaveNetwork();
+            break;
+
+        case ZPS_EVENT_ZDO_BIND:
+            vHandleZdoBindEvent(&psStackEvent->uEvent.sZdoBindEvent);
+            break;
+
+        case ZPS_EVENT_ZDO_UNBIND:
+            vHandleZdoUnbindEvent(&psStackEvent->uEvent.sZdoBindEvent);
             break;
 
         default:
@@ -564,17 +410,22 @@ PUBLIC void APP_vBdbCallback(BDB_tsBdbEvent *psBdbEvent)
 
         case BDB_EVENT_REJOIN_SUCCESS:
             DBG_vPrintf(TRUE, "BDB event callback: Network Join Successful\n");
-
-            //runLater(15000, vGetCoordinatorEndpoints, 0);
-
+            vHandleNetworkJoinAndRejoin();
             break;
 
         case BDB_EVENT_REJOIN_FAILURE:
             DBG_vPrintf(TRUE, "BDB event callback: Failed to rejoin\n");
+            vHandleRejoinFailure();
             break;
 
         case BDB_EVENT_NWK_STEERING_SUCCESS:
             DBG_vPrintf(TRUE, "BDB event callback: Network steering success\n");
+            vHandleNetworkJoinAndRejoin();
+            break;
+
+        case BDB_EVENT_NO_NETWORK:
+            DBG_vPrintf(TRUE, "BDB event callback: No good network to join\n");
+            vHandleRejoinFailure();
             break;
 
         case BDB_EVENT_FAILURE_RECOVERY_FOR_REJOIN:
@@ -587,38 +438,47 @@ PUBLIC void APP_vBdbCallback(BDB_tsBdbEvent *psBdbEvent)
     }
 }
 
+
+PRIVATE void vToggleSwitchValue()
+{
+    // Toggle the value
+    sSwitch.sOnOffServerCluster.bOnOff = sSwitch.sOnOffServerCluster.bOnOff ? FALSE : TRUE;
+
+    // Destination address - 0x0000 (coordinator)
+    tsZCL_Address addr;
+    addr.uAddress.u16DestinationAddress = 0x0000;
+    addr.eAddressMode = E_ZCL_AM_SHORT;
+
+    DBG_vPrintf(TRUE, "Reporting attribute... ");
+    PDUM_thAPduInstance myPDUM_thAPduInstance = hZCL_AllocateAPduInstance();
+    teZCL_Status status = eZCL_ReportAttribute(&addr,
+                                               GENERAL_CLUSTER_ID_ONOFF,
+                                               E_CLD_ONOFF_ATTR_ID_ONOFF,
+                                               HELLOZIGBEE_SWITCH_ENDPOINT,
+                                               1,
+                                               myPDUM_thAPduInstance);
+    PDUM_eAPduFreeAPduInstance(myPDUM_thAPduInstance);
+    DBG_vPrintf(TRUE, "status: %02x\n", status);
+}
+
 PRIVATE void APP_vTaskSwitch()
 {
-    ButtonPressType value;
-    if(ZQ_bQueueReceive(&buttonQueueHandle, (uint8*)&value))
+    ApplicationEvent value;
+    if(appEventQueue.receive(&value))
     {
         DBG_vPrintf(TRUE, "Processing button message %d\n", value);
 
         if(value == BUTTON_SHORT_PRESS)
         {
-            // Toggle the value
-            sSwitch.sOnOffServerCluster.bOnOff = sSwitch.sOnOffServerCluster.bOnOff ? FALSE : TRUE;
-
-            // Destination address - 0x0000 (coordinator)
-            tsZCL_Address addr;
-            addr.uAddress.u16DestinationAddress = 0x0000;
-            addr.eAddressMode = E_ZCL_AM_SHORT;
-
-            DBG_vPrintf(TRUE, "Reporing attribute... ", value);
-            PDUM_thAPduInstance myPDUM_thAPduInstance = hZCL_AllocateAPduInstance();
-            teZCL_Status status = eZCL_ReportAttribute(&addr,
-                                                       GENERAL_CLUSTER_ID_ONOFF,
-                                                       E_CLD_ONOFF_ATTR_ID_ONOFF,
-                                                       HELLOZIGBEE_SWITCH_ENDPOINT,
-                                                       1,
-                                                       myPDUM_thAPduInstance);
-            PDUM_eAPduFreeAPduInstance(myPDUM_thAPduInstance);
-            DBG_vPrintf(TRUE, "status: %02x\n", status);
+            vToggleSwitchValue();
         }
 
         if(value == BUTTON_LONG_PRESS)
         {
-            // TODO: add network join here
+            if(connectionState == JOINED)
+                vLeaveNetwork();
+            else
+                vJoinNetwork();
         }
     }
 }
@@ -640,12 +500,6 @@ extern "C" PUBLIC void vAppMain(void)
             u8PDM_CalculateFileSystemCapacity(),
             u8PDM_GetFileSystemOccupancy() );
 
-
-    // Initialize hardware
-    DBG_vPrintf(TRUE, "vAppMain(): init GPIO...\n");
-    vAHI_DioSetDirection(BOARD_BTN_PIN, BOARD_LED_PIN);
-    vAHI_DioSetPullup(BOARD_BTN_PIN, 0);
-
     // Initialize power manager and sleep mode
     DBG_vPrintf(TRUE, "vAppMain(): init PWRM...\n");
     PWRM_vInit(E_AHI_SLEEP_DEEP);
@@ -657,23 +511,26 @@ extern "C" PUBLIC void vAppMain(void)
     // Init timers
     DBG_vPrintf(TRUE, "vAppMain(): init software timers...\n");
     ZTIMER_eInit(timers, sizeof(timers) / sizeof(ZTIMER_tsTimer));
-    ZTIMER_eOpen(&blinkTimerHandle, blinkFunc, NULL, ZTIMER_FLAG_ALLOW_SLEEP);
-    ZTIMER_eOpen(&buttonScanTimerHandle, buttonScanFunc, NULL, ZTIMER_FLAG_ALLOW_SLEEP);
-    ZTIMER_eOpen(&runLaterTimerHandle, runLaterFunc, NULL, ZTIMER_FLAG_ALLOW_SLEEP);
 
-    // Initialize queues
+    // Init tasks
+    DBG_vPrintf(TRUE, "vAppMain(): init tasks...\n");
+    BlinkTask blinkTask(&sSwitch.sOnOffServerCluster.bOnOff);
+    ButtonsTask buttonsTask;
+
+    // Initialize ZigBee stack and application queues
     DBG_vPrintf(TRUE, "vAppMain(): init software queues...\n");
-    ZQ_vQueueCreate(&buttonQueueHandle, 3, sizeof(ButtonPressType), (uint8*)buttonQueue);
+    msgMlmeDcfmIndQueue.init();
+    msgMcpsDcfmIndQueue.init();
+    msgMcpsDcfmQueue.init();
+    timeEventQueue.init();
+    appEventQueue.init();
 
-    // Initialize ZigBee stack queues
-    ZQ_vQueueCreate(&zps_msgMlmeDcfmInd, MLME_QUEUE_SIZE, sizeof(MAC_tsMlmeVsDcfmInd), (uint8*)asMacMlmeVsDcfmInd);
-    ZQ_vQueueCreate(&zps_msgMcpsDcfmInd, MCPS_QUEUE_SIZE, sizeof(MAC_tsMcpsVsDcfmInd), (uint8*)asMacMcpsDcfmInd);
-    ZQ_vQueueCreate(&zps_TimeEvents, TIMER_QUEUE_SIZE, sizeof(zps_tsTimeEvent), (uint8*)asTimeEvent);
-    ZQ_vQueueCreate(&zps_msgMcpsDcfm, MCPS_DCFM_QUEUE_SIZE,	sizeof(MAC_tsMcpsVsCfmData), (uint8*)asMacMcpsDcfm);
-    ZQ_vQueueCreate(&APP_msgBdbEvents, BDB_QUEUE_SIZE, sizeof(BDB_tsZpsAfEvent), (uint8*)asBdbEvent);
-    ZQ_vQueueCreate(&runLaterDelayQueueHandle, RUN_LATER_QUEUE_SIZE, sizeof(uint32), (uint8*)runLaterDelayQueue);
-    ZQ_vQueueCreate(&runLaterCallbacksQueueHandle, RUN_LATER_QUEUE_SIZE, sizeof(uint32), (uint8*)runLaterCallbackQueue);
-    ZQ_vQueueCreate(&runLaterParamsQueueHandle, RUN_LATER_QUEUE_SIZE, sizeof(uint8), (uint8*)runLaterParamsQueue);
+    // Initialize deferred executor
+    DBG_vPrintf(TRUE, "vAppMain(): Initialize deferred executor...\n");
+    deferredExecutor.init();
+
+    // Restore network connection state
+    connectionState.init(NOT_JOINED);
 
     // Set up a status callback
     DBG_vPrintf(TRUE, "vAppMain(): init extended status callback...\n");
@@ -701,26 +558,19 @@ extern "C" PUBLIC void vAppMain(void)
 
     // Initialize Base Class Behavior
     DBG_vPrintf(TRUE, "vAppMain(): initialize base device behavior...\n");
+    Queue<BDB_tsZpsAfEvent, 3> bdbEventQueue;
+    bdbEventQueue.init();
+
     BDB_tsInitArgs sInitArgs;
-    sInitArgs.hBdbEventsMsgQ = &APP_msgBdbEvents;
+    sInitArgs.hBdbEventsMsgQ = bdbEventQueue.getHandle();
     BDB_vInit(&sInitArgs);
 
-    DBG_vPrintf(TRUE, "vAppMain(): Starting base device behavior...\n");
+    sBDB.sAttrib.bbdbNodeIsOnANetwork = (connectionState == JOINED ? TRUE : FALSE);
+    sBDB.sAttrib.u8bdbCommissioningMode = BDB_COMMISSIONING_MODE_NWK_STEERING;
+    DBG_vPrintf(TRUE, "vAppMain(): Starting base device behavior... bNodeIsOnANetwork=%d\n", sBDB.sAttrib.bbdbNodeIsOnANetwork);
+    ZPS_vSaveAllZpsRecords();
     BDB_vStart();
 
-    // Reset Zigbee stack to a very default state
-    ZPS_vDefaultStack();
-    ZPS_vSetKeys();
-    ZPS_eAplAibSetApsUseExtendedPanId(0);
-
-    // Start ZigBee stack
-    DBG_vPrintf(TRUE, "vAppMain(): Starting ZigBee stack... ");
-    status = ZPS_eAplZdoStartStack();
-    DBG_vPrintf(TRUE, "ZPS_eAplZdoStartStack() status %d\n", status);
-
-    // Start application timers
-    ZTIMER_eStart(blinkTimerHandle, ZTIMER_TIME_MSEC(1000));
-    ZTIMER_eStart(buttonScanTimerHandle, ZTIMER_TIME_MSEC(10));
 
     DBG_vPrintf(TRUE, "vAppMain(): Starting the main loop\n");
     while(1)
@@ -730,15 +580,6 @@ extern "C" PUBLIC void vAppMain(void)
         bdb_taskBDB();
 
         ZTIMER_vTask();
-
-        uint32 runLaterDelay;
-        if(ZTIMER_eGetState(runLaterTimerHandle) != E_ZTIMER_STATE_RUNNING &&
-           ZQ_bQueueReceive(&runLaterDelayQueueHandle, (uint8*)&runLaterDelay))
-        {
-            DBG_vPrintf(TRUE, "Scheduing next runLater call in %d ms\n", runLaterDelay);
-            ZTIMER_eStop(runLaterTimerHandle);
-            ZTIMER_eStart(runLaterTimerHandle, runLaterDelay);
-        }
 
         APP_vTaskSwitch();
 
@@ -761,10 +602,6 @@ PWRM_CALLBACK(PreSleep)
 
     // clear interrupts
     u32AHI_DioWakeStatus();
-
-    // Set the wake condition on falling edge of the button pin
-    vAHI_DioWakeEdge(0, BOARD_BTN_PIN);
-    vAHI_DioWakeEnable(BOARD_BTN_PIN, 0);
 }
 
 PWRM_CALLBACK(Wakeup)

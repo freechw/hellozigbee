@@ -155,11 +155,21 @@ LINK_DIRECTORIES(
 SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -TAppBuildZBPro.ld")
 
 SET(SOURCES
-        Main.cpp
 	irq_JN516x.S
         pdum_gen.c
         pdum_apdu.S
         zps_gen.c
+        Queue.h
+        Timer.h
+        PeriodicTask.h
+        PersistedValue.h
+        AppQueue.cpp
+        BlinkTask.cpp
+        ButtonsTask.cpp
+        DeferredExecutor.cpp
+        DumpFunctions.cpp
+        ConnectionState.cpp
+        Main.cpp
 )
 
 ADD_EXECUTABLE(HelloZigbee ${SOURCES})

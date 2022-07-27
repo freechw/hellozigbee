@@ -1,0 +1,23 @@
+#ifndef BUTTON_MODES_H
+#define BUTTON_MODES_H
+
+typedef enum
+{
+    SWITCH_MODE_TOGGLE,
+    SWITCH_MODE_MOMENTARY,
+    SWITCH_MODE_MULTIFUNCTION
+} SwitchMode;
+
+
+typedef enum
+{
+    RELAY_MODE_UNLINKED,
+    RELAY_MODE_FRONT,
+    RELAY_MODE_SINGLE,
+    RELAY_MODE_DOUBLE,
+    RELAY_MODE_TRIPPLE,
+    RELAY_MODE_LONG,
+} RelayMode;
+
+
+#endif //BUTTON_MODES_H

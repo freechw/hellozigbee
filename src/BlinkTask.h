@@ -2,6 +2,7 @@
 #define BLINKTASK_H
 
 #include "PeriodicTask.h"
+#include "GPIOPin.h"
 
 extern "C"
 {
@@ -10,12 +11,11 @@ extern "C"
 
 class BlinkTask : public PeriodicTask
 {
-    bool fastBlinking;
-    uint32 ledPinMask;
+    GPIOOutput ledPin;
 
 public:
     BlinkTask();
-    void init(uint8 ledPin);
+    void init(uint8 pin);
 
     void setBlinkMode(bool fast);
 

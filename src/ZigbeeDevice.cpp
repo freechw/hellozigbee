@@ -1,7 +1,3 @@
-#include "ZigbeeDevice.h"
-#include "DumpFunctions.h"
-#include "Queue.h"
-
 extern "C"
 {
     #include "jendefs.h"
@@ -18,6 +14,11 @@ extern "C"
     #include "OnOff.h"
 }
 
+#include "ZigbeeDevice.h"
+#include "DumpFunctions.h"
+#include "Queue.h"
+#include "LEDTask.h"
+#include "EndpointManager.h"
 
 extern PUBLIC tszQueue zps_msgMlmeDcfmInd;
 extern PUBLIC tszQueue zps_msgMcpsDcfmInd;
@@ -39,7 +40,7 @@ ZigbeeDevice::ZigbeeDevice()
     timeEventQueue.init();
 
     // Restore network connection state
-    connectionState.init(NOT_JOINED);
+    connectionState.init(NOT_JOINED, "connectionState");
 
     // Initialise Application Framework stack
     DBG_vPrintf(TRUE, "ZigbeeDevice(): init Application Framework (AF)... ");
@@ -76,6 +77,9 @@ void ZigbeeDevice::joinNetwork()
     ZPS_vSetKeys();
     ZPS_vSaveAllZpsRecords();
 
+    // Indicate we are joining
+    LEDTask::getInstance()->triggerSpecialEffect(LED_TASK_NETWORK_CONNECT_EFFECT);
+
     // Connect to a network
     ZPS_teStatus status = BDB_eNsStartNwkSteering();
     DBG_vPrintf(TRUE, "  BDB_eNsStartNwkSteering=%d\n", status);
@@ -85,9 +89,11 @@ void ZigbeeDevice::rejoinNetwork()
 {
     DBG_vPrintf(TRUE, "== Rejoining the network\n");
 
+    // Perpare network joining mode constants
     sBDB.sAttrib.bbdbNodeIsOnANetwork = (connectionState == JOINED ? TRUE : FALSE);
     sBDB.sAttrib.u8bdbCommissioningMode = BDB_COMMISSIONING_MODE_NWK_STEERING;
 
+    // Start network joining
     DBG_vPrintf(TRUE, "ZigbeeDevice(): Starting base device behavior... bNodeIsOnANetwork=%d\n", sBDB.sAttrib.bbdbNodeIsOnANetwork);
     ZPS_vSaveAllZpsRecords();
     BDB_vStart();
@@ -105,7 +111,9 @@ void ZigbeeDevice::leaveNetwork()
         // Leave failed, probably lost parent, so just reset everything
         DBG_vPrintf(TRUE, "== Failed to properly leave the network. Force leaving the network\n");
         handleLeaveNetwork();
-     }
+    }
+
+    EndpointManager::getInstance()->handleDeviceLeave();
 }
 
 void ZigbeeDevice::joinOrLeaveNetwork()
@@ -126,6 +134,9 @@ void ZigbeeDevice::handleNetworkJoinAndRejoin()
     DBG_vPrintf(TRUE, "== Device now is on the network\n");
     connectionState = JOINED;
 
+    // Stop network joining effect
+    LEDTask::getInstance()->stopEffect();
+
     // Store the extended network ID for future use
     ZPS_eAplAibSetApsUseExtendedPanId(ZPS_u64NwkNibGetEpid(ZPS_pvAplZdoGetNwkHandle()));
 
@@ -135,6 +146,8 @@ void ZigbeeDevice::handleNetworkJoinAndRejoin()
     if(ZPS_eAplZdoGetDeviceType() == ZPS_ZDO_DEVICE_ENDDEVICE)
         pollTask.startPoll(2000);
     rejoinFailures = 0;
+
+    EndpointManager::getInstance()->handleDeviceJoin();
 }
 
 void ZigbeeDevice::handleLeaveNetwork()
@@ -150,6 +163,8 @@ void ZigbeeDevice::handleLeaveNetwork()
     ZPS_vDefaultStack();
     ZPS_vSetKeys();
     ZPS_vSaveAllZpsRecords();
+
+    EndpointManager::getInstance()->handleDeviceLeave();
 }
 
 void ZigbeeDevice::handleRejoinFailure()
@@ -165,7 +180,10 @@ void ZigbeeDevice::handleRejoinFailure()
         cyclesTillNextRejoin = 4; // 4 * 15s = 1 minute
     }
     else
+    {
+        LEDTask::getInstance()->stopEffect();
         handleLeaveNetwork();
+    }
 }
 
 void ZigbeeDevice::handlePollResponse(ZPS_tsAfPollConfEvent* pEvent)
@@ -186,23 +204,7 @@ void ZigbeeDevice::handlePollResponse(ZPS_tsAfPollConfEvent* pEvent)
 
 void ZigbeeDevice::handleZdoDataIndication(ZPS_tsAfEvent * pEvent)
 {
-    ZPS_tsAfZdpEvent zdpEvent;
-
-    switch(pEvent->uEvent.sApsDataIndEvent.u16ClusterId)
-    {
-        case ZPS_ZDP_ACTIVE_EP_RSP_CLUSTER_ID:
-        {
-            bool res = zps_bAplZdpUnpackActiveEpResponse(pEvent, &zdpEvent);
-            DBG_vPrintf(TRUE, "Unpacking Active Endpoint Response: Status: %02x res:%02x\n", zdpEvent.uZdpData.sActiveEpRsp.u8Status, res);
-            for(uint8 i=0; i<zdpEvent.uZdpData.sActiveEpRsp.u8ActiveEpCount; i++)
-            {
-                uint8 ep = zdpEvent.uLists.au8Data[i];
-                DBG_vPrintf(TRUE, "Scheduling simple descriptor request for EP %d\n", ep);
-
-                //deferredExecutor.runLater(1000, vSendSimpleDescriptorReq, ep);
-            }
-        }
-    }
+    DBG_vPrintf(TRUE, "ZDO Data indication event: %d\n", pEvent->eType);
 }
 
 void ZigbeeDevice::handleZdoBindUnbindEvent(ZPS_tsAfZdoBindEvent * pEvent, bool bind)

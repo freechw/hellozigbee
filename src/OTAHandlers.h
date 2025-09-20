@@ -16,7 +16,6 @@ extern "C"
     #endif //OTA_H_FIXED
 }
 
-
 class OTAHandlers
 {
     uint8 otaEp;
@@ -31,8 +30,7 @@ public:
 private:
     void restoreOTAAttributes();
     void initFlash();
-    void vDumpOverridenMacAddress();
-    void saveOTAContext();
+    void saveOTAContext(tsOTA_PersistedData * pData);
 };
 
 #endif // OTAHANDLERS_H

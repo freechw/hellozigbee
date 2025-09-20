@@ -1,6 +1,6 @@
 # Check mandatory parameters
 if(NOT SDK_PREFIX)
-    message(FATAL_ERROR "No SDK_PREFIX specified (it must point to the root of JN-SW-4170 SDK)")
+    set(SDK_PREFIX "${CMAKE_SOURCE_DIR}/sdk" CACHE PATH "Path to the root of JN-SW-4170 SDK")
 endif()
 
 if(NOT TOOLCHAIN_PREFIX)
@@ -10,6 +10,13 @@ endif()
 if(NOT JENNIC_CHIP)
     message(FATAL_ERROR "No JENNIC_CHIP specified (it must reflect target chip name)")
 endif()
+
+# Correct SDK prefix so that it is absolute path
+if(NOT IS_ABSOLUTE ${SDK_PREFIX})
+    set(SDK_PREFIX "${CMAKE_CURRENT_BINARY_DIR}/${SDK_PREFIX}")
+endif()
+get_filename_component(SDK_PREFIX ${SDK_PREFIX} ABSOLUTE)
+message(STATUS "Using SDK path: ${SDK_PREFIX}")
 
 # Load the toolchain file for a selected chip
 get_filename_component(JENNIC_CMAKE_DIR ${CMAKE_CURRENT_LIST_FILE} DIRECTORY)
@@ -26,7 +33,7 @@ endif()
 
 
 # Set build parameters common for the app and Zigbee library
-ADD_DEFINITIONS(
+add_definitions(
 	-DJENNIC_CHIP_NAME=_${JENNIC_CHIP}
 	-DJENNIC_CHIP_FAMILY_NAME=_${JENNIC_CHIP_FAMILY}
 	-DJENNIC_CHIP_FAMILY_${JENNIC_CHIP_FAMILY}
@@ -61,7 +68,7 @@ else()
 endif()
 
 # Dump toolchain variables
-function(DUMP_COMPILER_SETTINGS)
+function(dump_compiler_settings)
     message(STATUS "")
     message(STATUS "======================")
     message(STATUS "Toolchain paths:")
@@ -110,7 +117,7 @@ function(generate_zps_and_pdum_targets ZPSCFG_FILE)
             zps_gen.c
             zps_gen.h
         COMMAND ${ZPS_CONFIG}
-                -n ${PROJECT_NAME}
+                -n ${BOARD}
                 -f ${ZPSCFG_FILE}
                 -o ${CMAKE_CURRENT_BINARY_DIR}
                 -t ${JENNIC_CHIP}
@@ -124,8 +131,9 @@ function(generate_zps_and_pdum_targets ZPSCFG_FILE)
         OUTPUT
             pdum_gen.c
             pdum_gen.h
+            pdum_apdu.S
         COMMAND ${PDUM_CONFIG}
-                -z ${PROJECT_NAME}
+                -z ${BOARD}
                 -f ${ZPSCFG_FILE}
                 -o ${CMAKE_CURRENT_BINARY_DIR}
         DEPENDS ${ZPSCFG_FILE}
@@ -144,7 +152,7 @@ function(set_target_filename TARGET)
     endif()
 endfunction()
 
-function(ADD_HEX_BIN_TARGETS TARGET)
+function(add_hex_bin_targets TARGET)
     set_target_filename(${TARGET})
 
     add_custom_target(OUTPUT "${TARGET}.hex"
@@ -154,36 +162,35 @@ function(ADD_HEX_BIN_TARGETS TARGET)
 
     add_custom_target("${TARGET}.bin"
         DEPENDS ${TARGET}
-        COMMAND ${CMAKE_OBJCOPY} -j .version -j .bir -j .flashheader -j .vsr_table -j .vsr_handlers -j .rodata -j .text -j .data -j .bss -j .heap -j .stack -j .ro_mac_address -j .ro_ota_header -j .pad -S -O binary ${FILENAME} ${FILENAME}.tmp.bin
-        COMMAND ${JET} -m otamerge --embed_hdr -c ${FILENAME}.tmp.bin -v JN516x -n 1 -t 1 -u 0x1037 -j "HelloZigbee2021                 " -o ${FILENAME}.bin
+        COMMAND ${CMAKE_OBJCOPY} -j .version -j .bir -j .flashheader -j .vsr_table -j .vsr_handlers -j .rodata -j .text -j .data -j .bss -j .heap -j .stack -j .ro_mac_address -j .ro_ota_header -j .ro_se_lnkKey -j .pad -S -O binary ${FILENAME} ${FILENAME}.tmp.bin
+        COMMAND ${JET} -m otamerge --embed_hdr -c ${FILENAME}.tmp.bin -v JN516x -n ${BUILD_NUMBER} -t ${FIRMWARE_FILE_TYPE} -u ${MANUFACTURER_ID} -j ${FIRMWARE_STRING} -o ${FILENAME}.bin
+        COMMAND ${CMAKE_COMMAND} -E remove -f ${FILENAME}.tmp.bin
     )
 endfunction()
 
-function(ADD_OTA_BIN_TARGETS TARGET)
+function(add_ota_bin_target TARGET)
     set_target_filename(${TARGET})
 
     add_custom_target(${TARGET}.ota
         DEPENDS ${TARGET}.bin
-        # HACK/TODO: setting file version to 2 (-n 2), so that OTA image is always newer than current version
-        COMMAND ${JET} -m otamerge --embed_hdr -c ${FILENAME}.tmp.bin -v JN516x -n 2 -t 1 -u 0x1037 -j "HelloZigbee2021                 " -o ${FILENAME}.bin
-        COMMAND ${JET} -m otamerge --ota -v JN516x -n 2 -t 1 -u 0x1037 -p 1 -c ${FILENAME}.bin -o ${FILENAME}.ota
+        COMMAND ${JET} -m otamerge --ota -v JN516x -n ${BUILD_NUMBER} -t ${FIRMWARE_FILE_TYPE} -u ${MANUFACTURER_ID} -p 1 -c ${FILENAME}.bin -o ${FILENAME}.ota
     )
 endfunction()
 
-function(ADD_DUMP_TARGET TARGET)
+function(add_dump_target TARGET)
     set_target_filename(${TARGET})
 
     add_custom_target(${TARGET}.dump DEPENDS ${TARGET} COMMAND ${CMAKE_OBJDUMP} -x -D -S -s ${FILENAME} | ${CMAKE_CPPFILT} > ${FILENAME}.dump)
 endfunction()
 
-function(PRINT_SIZE_OF_TARGETS TARGET)
+function(print_size_of_targets TARGET)
     set_target_filename(${TARGET})
     
     add_custom_command(TARGET ${TARGET} POST_BUILD COMMAND ${CMAKE_SIZE} ${FILENAME})
 endfunction()
 
-function(FLASH_FIRMWARE_TARGET TARGET)
+function(add_flash_firmware_target TARGET)
     set_target_filename(${TARGET})
 
-    add_custom_target(${TARGET}.flash DEPENDS ${TARGET}.bin COMMAND "C:\\NXP\\ProductionFlashProgrammer\\JN51xxProgrammer.exe" -V 0 -s COM5 -f ${FILENAME}.bin)
+    add_custom_target(${TARGET}.flash DEPENDS ${TARGET}.bin COMMAND "C:\\NXP\\ProductionFlashProgrammer\\JN51xxProgrammer.exe" -V 0 -s ${FLASH_PORT} -f ${FILENAME}.bin)
 endfunction()

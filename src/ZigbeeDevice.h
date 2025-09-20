@@ -1,13 +1,9 @@
 #ifndef ZIGBEEDEVICE_H
 #define ZIGBEEDEVICE_H
 
-#include "PersistedValue.h"
-#include "PdmIds.h"
-#include "PollTask.h"
-#include "Queue.h"
-
 extern "C"
 {
+    #include "jendefs.h"
     #include "zps_gen.h"
     #include "zps_apl_af.h"
     #include "bdb_api.h"
@@ -15,6 +11,11 @@ extern "C"
     // work around of a bug in appZpsBeaconHandler.h that does not have a closing } for its extern "C" statement
     }
 }
+
+#include "PersistedValue.h"
+#include "PdmIds.h"
+#include "PollTask.h"
+#include "Queue.h"
 
 class ZigbeeDevice
 {

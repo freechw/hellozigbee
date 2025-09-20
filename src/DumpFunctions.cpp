@@ -12,6 +12,13 @@ extern "C"
     #endif //_appZpsBeaconHandler_h_fixed_
 }
 
+// OTA linker scripts expect .ro_mac_address section to be defined even though the overriden
+// MAC address may not be used
+uint8 s_au8MacAddress[8]  __attribute__ ((section (".ro_mac_address"))) = {
+                    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+};
+
+
 PRIVATE void vPrintAddr(ZPS_tuAddress addr, uint8 mode)
 {
     if(mode == ZPS_E_ADDR_MODE_IEEE)
@@ -24,11 +31,12 @@ PRIVATE void vPrintAddr(ZPS_tuAddress addr, uint8 mode)
 
 void vDumpZclReadRequest(tsZCL_CallBackEvent *psEvent)
 {
+    // The passed event object does not provide information on what attribute is being read
+
     // Read command header
     tsZCL_HeaderParams headerParams;
     uint16 inputOffset = u16ZCL_ReadCommandHeader(psEvent->pZPSevent->uEvent.sApsDataIndEvent.hAPduInst,
-                                              &headerParams);
-
+                                                  &headerParams);
     // read input attribute Id
     uint16 attributeId;
     inputOffset += u16ZCL_APduInstanceReadNBO(psEvent->pZPSevent->uEvent.sApsDataIndEvent.hAPduInst,
@@ -36,19 +44,31 @@ void vDumpZclReadRequest(tsZCL_CallBackEvent *psEvent)
                                               E_ZCL_ATTRIBUTE_ID,
                                               &attributeId);
 
-
-    DBG_vPrintf(TRUE, "ZCL Read Attribute: EP=%d Cluster=%04x Command=%02x Attr=%04x\n",
+    DBG_vPrintf(TRUE, "ZCL Read Attribute: EP=%d Cluster=%04x Attr=%04x (status=%d)\n",
                 psEvent->u8EndPoint,
                 psEvent->pZPSevent->uEvent.sApsDataIndEvent.u16ClusterId,
-                headerParams.u8CommandIdentifier,
-                attributeId);
+                attributeId,
+                psEvent->uMessage.sIndividualAttributeResponse.eAttributeStatus);
 }
 
 void vDumpZclWriteAttributeRequest(tsZCL_CallBackEvent *psEvent)
 {
-    DBG_vPrintf(TRUE, "ZCL Write Attribute: Clustter %04x Attrib %04x\n",
-            psEvent->psClusterInstance->psClusterDefinition->u16ClusterEnum,
-            psEvent->uMessage.sIndividualAttributeResponse.u16AttributeEnum);
+    DBG_vPrintf(TRUE, "ZCL Write Attribute: EP=%d Cluster=%04x Attr=%04x\n",
+                psEvent->u8EndPoint,
+                psEvent->psClusterInstance->psClusterDefinition->u16ClusterEnum,
+                psEvent->uMessage.sIndividualAttributeResponse.u16AttributeEnum);
+}
+
+void vDumpAttributeReportingConfigureRequest(tsZCL_CallBackEvent *psEvent)
+{
+    tsZCL_AttributeReportingConfigurationRecord * psRecord = &psEvent->uMessage.sAttributeReportingConfigurationRecord;
+    DBG_vPrintf(TRUE, "ZCL Configure Reporting: Cluster %04x Attrib %04x: min=%d, max=%d, timeout=%d (Status=%02x)\n",
+        psEvent->psClusterInstance->psClusterDefinition->u16ClusterEnum,
+        psRecord->u16AttributeEnum, 
+        psRecord->u16MinimumReportingInterval,
+        psRecord->u16MaximumReportingInterval,
+        psRecord->u16TimeoutPeriodField,
+        psEvent->eZCL_Status);
 }
 
 extern "C" void vDumpDiscoveryCompleteEvent(ZPS_tsAfNwkDiscoveryEvent * pEvent)
@@ -359,29 +379,17 @@ void vDisplayDiscoveredNodes(void)
     for( i = 0; i < thisNib->sTblSize.u8NtDisc; i++)
     {
         DBG_vPrintf(TRUE, "  Index: %d", i );
-
         DBG_vPrintf(TRUE, "    EPID: %016llx", thisNib->sTbl.psNtDisc[i].u64ExtPanId);
-
         DBG_vPrintf(TRUE, "    PAN: %04x", thisNib->sTbl.psNtDisc[i].u16PanId);
-
         DBG_vPrintf(TRUE, "    SAddr: %04x", thisNib->sTbl.psNtDisc[i].u16NwkAddr);
-
         DBG_vPrintf(TRUE, "    LQI %d\n", thisNib->sTbl.psNtDisc[i].u8LinkQuality);
-
         DBG_vPrintf(TRUE, "    CH: %d", thisNib->sTbl.psNtDisc[i].u8LogicalChan);
-
         DBG_vPrintf(TRUE, "    PJ: %d", thisNib->sTbl.psNtDisc[i].uAncAttrs.bfBitfields.u1JoinPermit);
-
         DBG_vPrintf(TRUE, "    Coord: %d", thisNib->sTbl.psNtDisc[i].uAncAttrs.bfBitfields.u1PanCoord);
-
         DBG_vPrintf(TRUE, "    RT Cap: %d", thisNib->sTbl.psNtDisc[i].uAncAttrs.bfBitfields.u1ZrCapacity);
-
         DBG_vPrintf(TRUE, "    ED Cap: %d", thisNib->sTbl.psNtDisc[i].uAncAttrs.bfBitfields.u1ZedCapacity);
-
         DBG_vPrintf(TRUE, "    Depth: %d", thisNib->sTbl.psNtDisc[i].uAncAttrs.bfBitfields.u4Depth);
-
         DBG_vPrintf(TRUE, "    StPro: %d", thisNib->sTbl.psNtDisc[i].uAncAttrs.bfBitfields.u4StackProfile);
-
         DBG_vPrintf(TRUE, "    PP: %d\r\n", thisNib->sTbl.psNtDisc[i].uAncAttrs.bfBitfields.u1PotentialParent);
     }
 }
@@ -434,6 +442,27 @@ void vDisplayBindTable()
     }
 }
 
+
+void vDisplayGroupsTable()
+{
+    // Get pointers
+    ZPS_tsAplAib * aib = ZPS_psAplAibGetAib();
+    ZPS_tsAplApsmeAIBGroupTable * groupTable = aib->psAplApsmeGroupTable;
+    uint32 groupTableSize = groupTable->u32SizeOfGroupTable;
+    ZPS_tsAplApsmeGroupTableEntry * groupEntries = groupTable->psAplApsmeGroupTableId;
+
+    // Print the table
+    DBG_vPrintf(TRUE, "\n+++++++ Groups Table:\n");
+    for(uint32 i = 0; i < groupTableSize; i++)
+    {
+        DBG_vPrintf(TRUE, "    Group %04x:", groupEntries[i].u16Groupid);
+        for(uint8 j=0; j<(242 + 7)/8; j++)
+            DBG_vPrintf(TRUE, " %02x", groupEntries[i].au8Endpoint[j]);
+
+        DBG_vPrintf(TRUE, "\n");
+    }
+}
+
 void vDisplayAddressMap()
 {
     ZPS_tsNwkNib * nib = ZPS_psNwkNibGetHandle(ZPS_pvAplZdoGetNwkHandle());
@@ -447,6 +476,14 @@ void vDisplayAddressMap()
                     nib->sTbl.pu16AddrMapNwk[i],
                     ZPS_u64NwkNibGetMappedIeeeAddr(ZPS_pvAplZdoGetNwkHandle(),nib->sTbl.pu16AddrLookup[i]));
     }
+}
+
+void vDumpOverridenMacAddress()
+{    
+    DBG_vPrintf(TRUE, "MAC Address at address = %08x:  ", s_au8MacAddress);
+    for (int i=0; i<8; i++)
+        DBG_vPrintf(TRUE, "%02x ", s_au8MacAddress[i]);
+    DBG_vPrintf(TRUE, "\n");
 }
 
 void vDumpCurrentImageOTAHeader(uint8 otaEp)

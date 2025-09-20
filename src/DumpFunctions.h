@@ -17,13 +17,16 @@ extern "C"
 
     void vDumpZclReadRequest(tsZCL_CallBackEvent *psEvent);
     void vDumpZclWriteAttributeRequest(tsZCL_CallBackEvent *psEvent);
+    void vDumpAttributeReportingConfigureRequest(tsZCL_CallBackEvent *psEvent);
     void vDumpAfEvent(ZPS_tsAfEvent* psStackEvent);
     void vDumpNetworkParameters();
     void vDisplayDiscoveredNodes();
     void vDisplayNeighbourTable();
     void vDisplayBindTable();
+    void vDisplayGroupsTable();
     void vDisplayAddressMap();
 
+    void vDumpOverridenMacAddress();
     void vDumpCurrentImageOTAHeader(uint8 otaEp);
     void vDumpOTAMessage(tsOTA_CallBackMessage * pMsg);
 }

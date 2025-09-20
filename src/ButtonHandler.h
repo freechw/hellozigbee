@@ -3,7 +3,6 @@
 
 #include "ButtonModes.h"
 #include "IButtonHandler.h"
-#include "AppQueue.h"
 
 #include <jendefs.h>
 
@@ -23,6 +22,8 @@ class ButtonHandler: public IButtonHandler
 {
     SwitchEndpoint * endpoint;
 
+    bool prevState;
+    uint32 debounceTimer;
     uint32 currentStateDuration;
 
     SwitchMode switchMode;
@@ -38,7 +39,8 @@ class ButtonHandler: public IButtonHandler
         PRESSED2,
         PAUSE2,
         PRESSED3,
-        LONG_PRESS
+        LONG_PRESS,
+        INVALID
     };
 
     ButtonState currentState;
@@ -48,20 +50,21 @@ public:
 
     void setEndpoint(SwitchEndpoint * ep);
 
+    void setConfiguration(SwitchMode switchMode, RelayMode relayMode, uint16 maxPause, uint16 minLongPress);
     void setSwitchMode(SwitchMode mode);
     void setRelayMode(RelayMode mode);
     void setMaxPause(uint16 value);
     void setMinLongPress(uint16 value);
 
+    void resetButtonStateMachine();
+
 protected:
     virtual void handleButtonState(bool pressed);
-    virtual void resetButtonStateMachine();
 
-    virtual void changeState(ButtonState state);
+    virtual void changeState(ButtonState state, bool suppressLogging = false);
     virtual void buttonStateMachineToggle(bool pressed);
     virtual void buttonStateMachineMomentary(bool pressed);
     virtual void buttonStateMachineMultistate(bool pressed);
-    void sendButtonEvent(ApplicationEventType evtType);
 
     const char * getStateName(ButtonState state);
 };

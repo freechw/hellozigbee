@@ -1,13 +1,22 @@
 ################################
 # Common settings
 
-ADD_DEFINITIONS(
+add_definitions(
+        -DTARGET_BOARD_${BOARD}
+
+        -DBUILD_DATE="${BUILD_DATE}"
+        -DBUILD_DATE_LEN=${BUILD_DATE_LEN}
+        -DVERSION_STR="${VERSION_STR}"
+        -DVERSION_STR_LEN=${VERSION_STR_LEN}
+
         -DOTA_INTERNAL_STORAGE
 #        -DTRACE_ZCL=TRUE
-        -DTRACE_OTA_DEBUG=TRUE
+#        -DTRACE_OTA_DEBUG=TRUE
+        -DDEBUG_CLD_GROUPS
 #        -DDEBUG_BDB
-#        -DDEBUG_CLD_ONOFF
+        -DDEBUG_CLD_ONOFF
 #        -DDEBUG_ZQUEUE
+#        -DDEBUG_CLD_IDENTIFY
 
         -DBDB_SUPPORT_NWK_STEERING
 )
@@ -19,7 +28,7 @@ generate_zps_and_pdum_targets(${PROJECT_SOURCE_DIR}/src/HelloZigbee.zpscfg)
 ################################
 # Zigbee Library
 
-SET(ZIGBEE_SRC
+set(ZIGBEE_SRC
         ${SDK_PREFIX}/Components/ZigbeeCommon/Source/app_zps_link_keys.c
         ${SDK_PREFIX}/Components/ZigbeeCommon/Source/appZdpExtraction.c
         ${SDK_PREFIX}/Components/ZigbeeCommon/Source/appZpsBeaconHandler.c
@@ -34,6 +43,7 @@ SET(ZIGBEE_SRC
         ${SDK_PREFIX}/Components/ZCIF/Source/zcl_buffer.c
         ${SDK_PREFIX}/Components/ZCIF/Source/zcl_command.c
         ${SDK_PREFIX}/Components/ZCIF/Source/zcl_common.c
+        ${SDK_PREFIX}/Components/ZCIF/Source/zcl_configureReportingCommandHandle.c        
         ${SDK_PREFIX}/Components/ZCIF/Source/zcl_CustomCommandReceive.c
         ${SDK_PREFIX}/Components/ZCIF/Source/zcl_CustomCommandSend.c
         ${SDK_PREFIX}/Components/ZCIF/Source/zcl_defaultResponse.c
@@ -46,6 +56,7 @@ SET(ZIGBEE_SRC
         ${SDK_PREFIX}/Components/ZCIF/Source/zcl_readAttributesResponseHandle.c
         ${SDK_PREFIX}/Components/ZCIF/Source/zcl_reportManager.c
         ${SDK_PREFIX}/Components/ZCIF/Source/zcl_reportMaths.c
+        ${SDK_PREFIX}/Components/ZCIF/Source/zcl_reportScheduler.c
         ${SDK_PREFIX}/Components/ZCIF/Source/zcl_reportStringHandling.c
         ${SDK_PREFIX}/Components/ZCIF/Source/zcl_reportStructure.c
         ${SDK_PREFIX}/Components/ZCIF/Source/zcl_search.c
@@ -57,6 +68,12 @@ SET(ZIGBEE_SRC
         ${SDK_PREFIX}/Components/ZCL/Clusters/General/Source/Basic.c
         ${SDK_PREFIX}/Components/ZCL/Clusters/General/Source/BasicClientCommands.c
         ${SDK_PREFIX}/Components/ZCL/Clusters/General/Source/BasicCommandHandler.c
+        ${SDK_PREFIX}/Components/ZCL/Clusters/General/Source/DeviceTemperatureConfiguration.c
+        ${SDK_PREFIX}/Components/ZCL/Clusters/General/Source/Groups.c
+        ${SDK_PREFIX}/Components/ZCL/Clusters/General/Source/GroupsClientCommands.c
+        ${SDK_PREFIX}/Components/ZCL/Clusters/General/Source/GroupsCommandHandler.c
+        ${SDK_PREFIX}/Components/ZCL/Clusters/General/Source/GroupsServerCommands.c
+        ${SDK_PREFIX}/Components/ZCL/Clusters/General/Source/GroupsTableManager.c
         ${SDK_PREFIX}/Components/ZCL/Clusters/General/Source/Identify.c
         ${SDK_PREFIX}/Components/ZCL/Clusters/General/Source/IdentifyClientCommands.c
         ${SDK_PREFIX}/Components/ZCL/Clusters/General/Source/IdentifyCommandHandler.c
@@ -86,8 +103,9 @@ SET(ZIGBEE_SRC
         # Generated (used by bdb_ns.c)
         pdum_gen.h
 )
-ADD_LIBRARY(ZigBee STATIC ${ZIGBEE_SRC})
-TARGET_INCLUDE_DIRECTORIES(ZigBee PRIVATE
+add_library(ZigBee STATIC ${ZIGBEE_SRC})
+set_source_files_properties(${SDK_PREFIX}/Components/ZCL/Clusters/OTA/Source/OTA.c PROPERTIES COMPILE_FLAGS -Wno-unused-variable)
+target_include_directories(ZigBee PRIVATE
         ${SDK_PREFIX}/Components/BDB/Include
         ${SDK_PREFIX}/Components/BDB/Source/Common
         ${SDK_PREFIX}/Components/BDB/Source/NwkSteering
@@ -106,7 +124,7 @@ TARGET_INCLUDE_DIRECTORIES(ZigBee PRIVATE
 ################################
 # Hello Zigbee
 
-INCLUDE_DIRECTORIES(
+include_directories(
     ${PROJECT_SOURCE_DIR}
 
     ${SDK_PREFIX}/Components/Aes/Include
@@ -144,17 +162,16 @@ INCLUDE_DIRECTORIES(
     ${PROJECT_SOURCE_DIR}/src
 )
 
-LINK_DIRECTORIES(
+link_directories(
 	${SDK_PREFIX}/Components/Library
 	${SDK_PREFIX}/Chip/${JENNIC_CHIP}/Build
 	${SDK_PREFIX}/Platform/DK4/Library
 )
 
-SET(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -T${HelloZigbee_SOURCE_DIR}/src/HelloZigbee.ld")
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -T${HelloZigbee_SOURCE_DIR}/src/HelloZigbee.ld")
 
-SET(SOURCES
+set(SOURCES
 	irq_JN516x.S
-        pdum_apdu.S
         Queue.h
         Timer.h
         PeriodicTask.h
@@ -163,17 +180,20 @@ SET(SOURCES
         PdmIds.h
         GPIOPin.h
         PWMPin.h
-        AppQueue.cpp
         BlinkTask.cpp
         ButtonsTask.cpp
+        DebugInput.cpp
+        LEDTask.cpp
+        LEDHandler.cpp
+        LEDPair.cpp
+        RelayHandler.cpp
+        RelayTask.cpp
         ButtonHandler.cpp
         PollTask.cpp
-        DeferredExecutor.cpp
         DumpFunctions.cpp
         Endpoint.cpp
         SwitchEndpoint.cpp
         EndpointManager.cpp
-        ZigbeeUtils.cpp
         ZigbeeDevice.cpp
         BasicClusterEndpoint.cpp
 	OOSC.c
@@ -184,10 +204,11 @@ SET(SOURCES
         # Generated by generate_zps_and_pdum_targets()
         zps_gen.c
         pdum_gen.c
+        pdum_apdu.S
 )
 
-ADD_EXECUTABLE(HelloZigbee ${SOURCES})
-TARGET_LINK_LIBRARIES(HelloZigbee
+add_executable(HelloZigbee ${SOURCES})
+target_link_libraries(HelloZigbee
         -Wl,--start-group
 
 	ZigBee	
@@ -215,8 +236,8 @@ TARGET_LINK_LIBRARIES(HelloZigbee
         -Wl,--end-group
 )
 
-PRINT_SIZE_OF_TARGETS(HelloZigbee)
-ADD_HEX_BIN_TARGETS(HelloZigbee)
-ADD_DUMP_TARGET(HelloZigbee)
-FLASH_FIRMWARE_TARGET(HelloZigbee)
-ADD_OTA_BIN_TARGETS(HelloZigbee)
+print_size_of_targets(HelloZigbee)
+add_hex_bin_targets(HelloZigbee)
+add_dump_target(HelloZigbee)
+add_flash_firmware_target(HelloZigbee)
+add_ota_bin_target(HelloZigbee)

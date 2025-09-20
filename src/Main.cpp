@@ -13,25 +13,18 @@ extern "C"
 }
 
 #include "Queue.h"
-#include "DeferredExecutor.h"
 #include "ButtonsTask.h"
-#include "AppQueue.h"
 #include "SwitchEndpoint.h"
 #include "EndpointManager.h"
 #include "BasicClusterEndpoint.h"
 #include "ZigbeeDevice.h"
 #include "ZCLTimer.h"
+#include "LEDTask.h"
+#include "BlinkTask.h"
+#include "RelayTask.h"
+#include "DumpFunctions.h"
+#include "DebugInput.h"
 
-const uint8 SWITCH1_LED_PIN = 17;
-const uint8 SWITCH2_LED_PIN = 12;
-
-const uint8 SWITCH1_BTN_BIT = 1;
-const uint32 SWITCH1_BTN_MASK = 1UL << SWITCH1_BTN_BIT;
-const uint8 SWITCH2_BTN_BIT = 3;
-const uint32 SWITCH2_BTN_MASK = 1UL << SWITCH2_BTN_BIT;
-
-
-DeferredExecutor deferredExecutor;
 
 // Hidden funcctions (exported from the library, but not mentioned in header files)
 extern "C"
@@ -42,34 +35,25 @@ extern "C"
 }
 
 
-// 6 timers are:
+// 7 timers are:
 // - 1 in ButtonTask
-// - 2 in SwitchEndpoints
+// - 1 in LEDTask
+// - 1 in RelayTask
+// - 1 in Heartbeat BlinkTask
 // - 1 in PollTask
-// - 1 in DeferredExecutor (TODO: Do we still need it?)
 // - 1 is ZCL timer
 // Note: if not enough space in this timers array, some of the functions (e.g. network joining) may not work properly
-ZTIMER_tsTimer timers[6 + BDB_ZTIMER_STORAGE];
-
-
-struct Context
-{
-    BasicClusterEndpoint basicEndpoint;
-    SwitchEndpoint switch1;
-    SwitchEndpoint switch2;
-};
-
+ZTIMER_tsTimer timers[7 + BDB_ZTIMER_STORAGE];
 
 extern "C" void __cxa_pure_virtual(void) __attribute__((__noreturn__));
 extern "C" void __cxa_deleted_virtual(void) __attribute__((__noreturn__));
 
 void __cxa_pure_virtual(void)
 {
-  DBG_vPrintf(TRUE, "!!!!!!! Pure virtual function call.\n");
-  while (1)
-    ;
+    DBG_vPrintf(TRUE, "!!!!!!! Pure virtual function call.\n");
+    while (1)
+        ;
 }
-
 
 extern "C" PUBLIC void vISR_SystemController(void)
 {
@@ -97,75 +81,17 @@ void vfExtendedStatusCallBack (ZPS_teExtendedStatus eExtendedStatus)
     DBG_vPrintf(TRUE,"ERROR: Extended status %x\n", eExtendedStatus);
 }
 
-#if 0
-PRIVATE void vGetCoordinatorEndpoints(uint8)
-{
-    PDUM_thAPduInstance hAPduInst = PDUM_hAPduAllocateAPduInstance(apduZDP);
-
-    // Destination address - 0x0000 (Coordinator)
-    ZPS_tuAddress uDstAddr;
-    uDstAddr.u16Addr = 0;
-
-    // Active Endpoints request
-    ZPS_tsAplZdpActiveEpReq sNodeDescReq;
-    sNodeDescReq.u16NwkAddrOfInterest = uDstAddr.u16Addr;
-
-    // Send the request
-    uint8 u8SeqNumber;
-    ZPS_teStatus status = ZPS_eAplZdpActiveEpRequest(hAPduInst,
-                                                     uDstAddr,
-                                                     FALSE,       // bExtAddr
-                                                     &u8SeqNumber,
-                                                     &sNodeDescReq);
-
-    DBG_vPrintf(TRUE, "Sent Active endpoints request to coordinator %d\n", status);
-}
-
-PRIVATE void vSendSimpleDescriptorReq(uint8 ep)
-{
-    PDUM_thAPduInstance hAPduInst = PDUM_hAPduAllocateAPduInstance(apduZDP);
-
-    // Destination address - 0x0000 (Coordinator)
-    ZPS_tuAddress uDstAddr;
-    uDstAddr.u16Addr = 0;
-
-    // Simple Descriptor request
-    ZPS_tsAplZdpSimpleDescReq sSimpleDescReq;
-    sSimpleDescReq.u16NwkAddrOfInterest = uDstAddr.u16Addr;
-    sSimpleDescReq.u8EndPoint = ep;
-
-    // Send the request
-    uint8 u8SeqNumber;
-    ZPS_teStatus status = ZPS_eAplZdpSimpleDescRequest(hAPduInst,
-                                                     uDstAddr,
-                                                     FALSE,       // bExtAddr
-                                                     &u8SeqNumber,
-                                                     &sSimpleDescReq);
-
-    DBG_vPrintf(TRUE, "Sent Simple Descriptor request to coordinator for EP %d (status %d)\n", ep, status);
-}
-#endif //0
-
 PUBLIC void wakeCallBack(void)
 {
     DBG_vPrintf(TRUE, "=-=-=- wakeCallBack()\n");
 }
 
-PRIVATE void APP_vTaskSwitch(Context * context)
+PRIVATE void scheduleSleep()
 {
-    ApplicationEvent evt;
-    if(appEventQueue.receive(&evt))
-    {
-        DBG_vPrintf(TRUE, "Processing button message type=%s, button=%d\n", getApplicationEventName(evt.eventType), evt.buttonId);
-
-        if(evt.eventType == BUTTON_VERY_LONG_PRESS)
-        {
-            ZigbeeDevice::getInstance()->joinOrLeaveNetwork();
-        }
-    }
-
     if(ButtonsTask::getInstance()->canSleep() &&
-       ZigbeeDevice::getInstance()->canSleep())
+       ZigbeeDevice::getInstance()->canSleep() &&
+       LEDTask::getInstance()->canSleep() &&
+       RelayTask::getInstance()->canSleep())
     {
         static pwrm_tsWakeTimerEvent wakeStruct;
         PWRM_teStatus status = PWRM_eScheduleActivity(&wakeStruct, 15 * 32000, wakeCallBack);
@@ -182,12 +108,18 @@ extern "C" PUBLIC void vAppMain(void)
     portENABLE_INTERRUPTS();
 
     // Initialize UART
+    vAHI_UartSetRTSCTS(E_AHI_UART_0, FALSE);
     DBG_vUartInit(DBG_E_UART_0, DBG_E_UART_BAUD_RATE_115200);
 
+    // Print welcome message
+    DBG_vPrintf(TRUE, "\n-------------------------------------------------------------\n");
+    DBG_vPrintf(TRUE, "Initializing Hello Zigbee Platform for target board '%s'\n", CLD_BAS_MODEL_ID_STR);
+    DBG_vPrintf(TRUE, "-------------------------------------------------------------\n\n");
+
     // Initialize PDM
-    DBG_vPrintf(TRUE, "vAppMain(): init PDM...\n");
+    DBG_vPrintf(TRUE, "vAppMain(): init PDM...  ");
     PDM_eInitialise(0);
-    DBG_vPrintf(TRUE, "vAppMain(): PDM Capacity %d Occupancy %d\n",
+    DBG_vPrintf(TRUE, "PDM Capacity %d Occupancy %d\n",
             u8PDM_CalculateFileSystemCapacity(),
             u8PDM_GetFileSystemOccupancy() );
 
@@ -204,48 +136,71 @@ extern "C" PUBLIC void vAppMain(void)
     ZTIMER_eInit(timers, sizeof(timers) / sizeof(ZTIMER_tsTimer));
 
     // Init tasks
-    DBG_vPrintf(TRUE, "vAppMain(): init tasks...\n");
-    ButtonsTask::getInstance();
+    DBG_vPrintf(TRUE, "vAppMain(): init periodic tasks...\n");
+    ZCLTimer::getInstance()->start();
+    ButtonsTask::getInstance()->start();
+    LEDTask::getInstance();
+    RelayTask::getInstance();
 
-    // Initialize application queue
-    DBG_vPrintf(TRUE, "vAppMain(): init software queues...\n");
-    appEventQueue.init();
-
-    // Initialize periodic tasks
-    DBG_vPrintf(TRUE, "vAppMain(): Initialize periodic tasks...\n");
-    deferredExecutor.init();
-    ZCLTimer zclTimer;
-    zclTimer.init();
-    zclTimer.startTimer(1000);
+    // Initialize the heartbeat LED (if there is one)
+#ifdef HEARTBEAT_LED_MASK
+    BlinkTask blinkTask;
+    blinkTask.init(HEARTBEAT_LED_MASK);
+#endif
 
     // Set up a status callback
     DBG_vPrintf(TRUE, "vAppMain(): init extended status callback...\n");
     ZPS_vExtendedStatusSetCallback(vfExtendedStatusCallBack);
 
+    // Register endpoints and assign buttons for them
     DBG_vPrintf(TRUE, "vAppMain(): Registering endpoint objects\n");
-    Context context;
-    context.switch1.setPins(SWITCH1_LED_PIN, SWITCH1_BTN_MASK);
-    context.switch2.setPins(SWITCH2_LED_PIN, SWITCH2_BTN_MASK);
-    EndpointManager::getInstance()->registerEndpoint(HELLOENDDEVICE_BASIC_ENDPOINT, &context.basicEndpoint);
-    EndpointManager::getInstance()->registerEndpoint(HELLOENDDEVICE_SWITCH1_ENDPOINT, &context.switch1);
-    EndpointManager::getInstance()->registerEndpoint(HELLOENDDEVICE_SWITCH2_ENDPOINT, &context.switch2);
+    BasicClusterEndpoint basicEndpoint;
+    EndpointManager::getInstance()->registerEndpoint(BASIC_ENDPOINT, &basicEndpoint);
+
+    SwitchEndpoint switch1;
+    switch1.setConfiguration(SWITCH1_BTN_MASK);
+    EndpointManager::getInstance()->registerEndpoint(SWITCH1_ENDPOINT, &switch1);
+
+#ifdef SWITCH2_BTN_PIN
+    SwitchEndpoint switch2;
+    switch2.setConfiguration(SWITCH2_BTN_MASK);
+    EndpointManager::getInstance()->registerEndpoint(SWITCH2_ENDPOINT, &switch2);
+
+    switch1.setInterlockBuddy(&switch2);
+    switch2.setInterlockBuddy(&switch1);
+
+    SwitchEndpoint switchBoth;
+    switchBoth.setConfiguration(SWITCH1_BTN_MASK | SWITCH2_BTN_MASK, true);
+    EndpointManager::getInstance()->registerEndpoint(SWITCHB_ENDPOINT, &switchBoth);
+#endif
+
+    // Init the ZigbeeDevice, AF, BDB, and other network stuff
+    ZigbeeDevice::getInstance();
+
+    // Print Initialization finished message
+    DBG_vPrintf(TRUE, "\n---------------------------------------------------\n");
+    DBG_vPrintf(TRUE, "Initialization of the Hello Zigbee Platform Finished\n");
+    DBG_vPrintf(TRUE, "---------------------------------------------------\n\n");
 
     // Start ZigbeeDevice and rejoin the network (if was joined)
     ZigbeeDevice::getInstance()->rejoinNetwork();
 
-    DBG_vPrintf(TRUE, "vAppMain(): Starting the main loop\n");
+    DBG_vPrintf(TRUE, "\nvAppMain(): Starting the main loop\n");
     while(1)
     {
+        // Run Zigbee stack stuff
         zps_taskZPS();
-
         bdb_taskBDB();
 
+        // Process all periodic tasks
         ZTIMER_vTask();
 
-        APP_vTaskSwitch(&context);
+        // Process all incoming debug input
+        DebugInput::getInstance().handleInput();
 
+        // Schedule sleep, if no activities are running. Reset the watchdog timer.
+        scheduleSleep();
         vAHI_WatchdogRestart();
-
         PWRM_vManagePower();
     }
 }
@@ -284,13 +239,13 @@ PWRM_CALLBACK(Wakeup)
     DBG_vPrintf(TRUE, "\nWaking...\n");
     DBG_vUartFlush();
 
+    // Restore Mac settings (turns radio on)
+    vMAC_RestoreSettings();
+
     // Re-initialize hardware and interrupts
     TARGET_INITIALISE();
     SET_IPL(0);
     portENABLE_INTERRUPTS();
-
-    // Restore Mac settings (turns radio on)
-    vMAC_RestoreSettings();
 
     // Wake the timers
     ZTIMER_vWake();

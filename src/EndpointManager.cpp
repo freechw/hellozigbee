@@ -59,7 +59,7 @@ EndpointManager::EndpointManager()
     memset(registry, 0, sizeof(Endpoint*) * (ZCL_NUMBER_OF_ENDPOINTS+1));
 
     // Initialize ZCL
-    DBG_vPrintf(TRUE, "vAppMain(): init Zigbee Class Library (ZCL)...  ");
+    DBG_vPrintf(TRUE, "EndpointManager::EndpointManager(): init Zigbee Class Library (ZCL)...  ");
     ZPS_teStatus status = eZCL_Initialise(&APP_ZCL_cbGeneralCallback, apduZCL);
     DBG_vPrintf(TRUE, "eZCL_Initialise() status %d\n", status);
 }
@@ -90,4 +90,16 @@ void EndpointManager::handleZclEventInt(tsZCL_CallBackEvent *psEvent)
 void EndpointManager::handleZclEvent(tsZCL_CallBackEvent *psEvent)
 {
     EndpointManager::getInstance()->handleZclEventInt(psEvent);
+}
+
+void EndpointManager::handleDeviceJoin()
+{
+    for(uint8 ep = 1; ep <= ZCL_NUMBER_OF_ENDPOINTS; ep++)
+        registry[ep]->handleDeviceJoin();
+}
+
+void EndpointManager::handleDeviceLeave()
+{
+    for(uint8 ep = 1; ep <= ZCL_NUMBER_OF_ENDPOINTS; ep++)
+        registry[ep]->handleDeviceJoin();
 }
